@@ -34,6 +34,8 @@ def visualize_list(data, title="List Visualization", xlabel="Index", ylabel="Val
     print(f"Min: {np.min(data):.4f}")
     print(f"Max: {np.max(data):.4f}")
 
+    return plt.gcf()
+
 
 def visualize_two_lists(true, pred, title="Comparison of Two Lists", label1="True", label2="Prediction"):
     """
@@ -69,3 +71,5 @@ def visualize_two_lists(true, pred, title="Comparison of Two Lists", label1="Tru
     print(f"{label2} std: {np.std(pred):.4f}")
     print(f"Correlation: {np.corrcoef(true, pred)[0,1]:.4f}")
     print(f"Mean Absolute Difference: {np.mean(np.abs(np.array(true) - np.array(pred))):.4f}")
+
+    return plt.gcf()
