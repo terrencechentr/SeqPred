@@ -62,7 +62,7 @@ def visualize_two_lists(true, pred, title="Comparison of Two Lists", label1="Tru
     plt.title(title)
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.show()
+    fig = plt.gcf()
     
     # Print some statistics
     print(f"{label1} mean: {np.mean(true):.4f}")
@@ -72,4 +72,4 @@ def visualize_two_lists(true, pred, title="Comparison of Two Lists", label1="Tru
     print(f"Correlation: {np.corrcoef(true, pred)[0,1]:.4f}")
     print(f"Mean Absolute Difference: {np.mean(np.abs(np.array(true) - np.array(pred))):.4f}")
 
-    return plt.gcf()
+    return fig

@@ -319,6 +319,7 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
         self,
         input_values: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         input_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Cache] = None,
@@ -341,7 +342,9 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
         sequence_output = outputs.last_hidden_state
         sequence_output = self.score(sequence_output)
 
-        loss = self.loss_function(preds=sequence_output, labels=input_values.detach())
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(preds=sequence_output, labels=labels)
 
         return CseptOutput(
             loss=loss,
