@@ -13,6 +13,7 @@ from transformers.utils import can_return_tuple
 from transformers.processing_utils import Unpack
 from transformers.models.qwen2.modeling_qwen2 import BlockMask, make_flex_block_causal_mask, AttentionMaskConverter, StaticCache, SlidingWindowCache, DynamicCache
 from .configuration_csept import CseptConfig
+import torch.nn.functional as F
 
 logger = logging.get_logger(__name__)
 
@@ -313,6 +314,7 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
         super().__init__(config)
         self.model = CseptModel(config)
         self.score = nn.Linear(config.hidden_size, 1, bias=False)
+        self.loss_type = config.loss_type
         self.post_init()
 
     def forward(
@@ -322,14 +324,14 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
         labels: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         input_embeds: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional["Cache"] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs) -> CseptOutput:
-
-        outputs: BaseModelOutputWithPast = self.model(
+        **kwargs
+    ):
+        outputs = self.model(
             input_values=input_values,
             input_embeds=input_embeds,
             attention_mask=attention_mask,
@@ -338,13 +340,13 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            cache_position=cache_position)
-        sequence_output = outputs.last_hidden_state
-        sequence_output = self.score(sequence_output)
+            cache_position=cache_position,
+        )
+        sequence_output = self.score(outputs.last_hidden_state)
 
         loss = None
         if labels is not None:
-            loss = self.loss_function(preds=sequence_output, labels=labels)
+            loss = self.compute_loss(sequence_output, labels)
 
         return CseptOutput(
             loss=loss,
@@ -353,19 +355,32 @@ class CspetForSequencePrediction(Qwen2PreTrainedModel):
             attentions=outputs.attentions,
         )
 
-    def loss_function(self, preds: torch.FloatTensor, labels: torch.FloatTensor):
-        return torch.nn.MSELoss()(preds[:, :-1, :], labels[:, 1:, :])
+    def compute_loss(self, preds: torch.FloatTensor, labels: torch.FloatTensor):
+        """根据 config.loss_type 选择不同损失函数"""
+        preds = preds[:, :-1, :]
+        labels = labels[:, 1:, :]
+
+        if self.loss_type == "mse":
+            return F.mse_loss(preds, labels)
+        elif self.loss_type == "mae":
+            return F.l1_loss(preds, labels)
+        elif self.loss_type == "smooth_l1":
+            return F.smooth_l1_loss(preds, labels)
+        elif self.loss_type == "log_cosh":
+            diff = preds - labels
+            return torch.mean(torch.log(torch.cosh(diff + 1e-12)))
+        elif self.loss_type == "huber":
+            return F.huber_loss(preds, labels, delta=1.0)
+        else:
+            raise ValueError(f"Unsupported loss type: {self.loss_type}")
 
     @torch.no_grad()
-    def generate(self, input_values: torch.FloatTensor, max_length: int, noise_level: float = 0.1) -> torch.FloatTensor:
+    def generate(self, input_values: torch.FloatTensor, max_length: int, noise_level: float = 0.1):
         generated_values = [input_values.clone()]
-        for i in range(max_length):
+        for _ in range(max_length):
             output = self.forward(input_values=input_values)
             preds = output.preds[:, -1:, :]
-
-            input_values = torch.cat(generated_values+[preds], dim=-2)
+            input_values = torch.cat(generated_values + [preds], dim=-2)
             input_values = input_values + torch.randn_like(input_values) * noise_level
-
             generated_values.append(preds)
-            
         return torch.cat(generated_values, dim=-2)

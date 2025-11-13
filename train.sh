@@ -1,18 +1,17 @@
-wandb_entity=terrencechen
-
-wandb_project=SeqPred-grid-5dimInput
+project_name=SeqPred-grid-csept_256
 noise_level=0.01
 epochs=50
 learning_rate=0.001
-batch_size=32
-attention_dropout=0.1
+batch_size=64
+early_stopping_patience=20
+pred_length=256
 
-for hidden_size in {8,16}; do
-    for num_hidden_layers in {4,8}; do
-        for num_attention_heads in {2,4}; do
+for hidden_size in {8,16,32,64}; do
+    for num_hidden_layers in {4,8,16,32}; do
+        for num_attention_heads in {4,8,16}; do
             for num_key_value_heads in {2,4}; do
                 for optimizer in {adam,sgd,adagrad}; do
-                    for pred_length in {256,1024}; do
+                    for loss_type in {mse,mae,smooth_l1,log_cosh,huber}; do
                         python train_csept.py --hidden_size $hidden_size \
                         --num_hidden_layers $num_hidden_layers \
                         --num_attention_heads $num_attention_heads \
@@ -22,10 +21,10 @@ for hidden_size in {8,16}; do
                         --optimizer $optimizer \
                         --epochs $epochs \
                         --batch_size $batch_size \
-                        --attention_dropout $attention_dropout \
+                        --early_stopping_patience $early_stopping_patience \
                         --learning_rate $learning_rate \
-                        --wandb_entity $wandb_entity \
-                        --wandb_project $wandb_project
+                        --project_name $project_name \
+                        --loss_type $loss_type
                     done
                 done
             done

@@ -126,6 +126,7 @@ class CseptConfig(PretrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         attention_dropout=0.0,
+        loss_type="mse",
         **kwargs,
     ):
         self.max_position_embeddings = max_position_embeddings
@@ -137,7 +138,8 @@ class CseptConfig(PretrainedConfig):
         self.use_sliding_window = use_sliding_window
         self.sliding_window = sliding_window  # we check `use_sliding_window` in the modeling code
         self.max_window_layers = max_window_layers
-
+        self.loss_type = loss_type
+        
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
