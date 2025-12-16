@@ -191,6 +191,22 @@ def create_config(args):
             intermediate_size=args.intermediate_size,
             classifier_dropout=0.1,
         )
+    elif args.model_type == "rnn_naive":
+        from models import RnnNaiveConfig
+        config = RnnNaiveConfig(
+            input_size=args.input_size,
+            hidden_size=args.hidden_size,
+            num_layers=args.num_layers,
+            loss_type=args.loss_type,
+        )
+    elif args.model_type == "lstm_naive":
+        from models import LstmNaiveConfig
+        config = LstmNaiveConfig(
+            input_size=args.input_size,
+            hidden_size=args.hidden_size,
+            num_layers=args.num_layers,
+            loss_type=args.loss_type,
+        )
     else:
         raise ValueError(f"不支持的模型类型: {args.model_type}")
     
@@ -379,7 +395,7 @@ def build_train_parser(add_help: bool = False) -> argparse.ArgumentParser:
         '--model_type',
         type=str,
         required=True,
-        choices=['csept', 'csept_smooth', 'sept'],
+        choices=['csept', 'csept_smooth', 'sept', 'rnn_naive', 'lstm_naive'],
         help='模型类型',
     )
     parser.add_argument(

@@ -63,7 +63,8 @@ def evaluate_model(model, test_loader, device, model_type):
     return avg_loss, all_predictions, all_labels
 
 
-def autoregressive_predict(model, initial_input, predict_steps, device, model_type, initial_length, noise_std: float = 0.0):
+def autoregressive_predict(model, initial_input, predict_steps, device, model_type, initial_length,
+                          noise_std: float = 0.0, feature_mean: torch.Tensor = None, feature_std: torch.Tensor = None):
     """
     自回归预测
     
@@ -83,6 +84,12 @@ def autoregressive_predict(model, initial_input, predict_steps, device, model_ty
     current_input = initial_input.clone()
     if initial_length < current_input.shape[1]:
         current_input[:, initial_length:, :] = 0.0
+    
+    # 准备特征分布（用于非目标特征的随机采样）
+    if feature_mean is not None:
+        feature_mean = feature_mean.to(device).view(1, 1, -1)
+    if feature_std is not None:
+        feature_std = feature_std.to(device).view(1, 1, -1)
     
     with torch.no_grad():
         for _ in range(predict_steps):
@@ -108,7 +115,12 @@ def autoregressive_predict(model, initial_input, predict_steps, device, model_ty
             predictions.append(pred[:, :, 0:1].cpu().numpy())
             
             # 更新输入（滑动窗口，长度保持为seq_length）
-            new_features = pred.repeat(1, 1, current_input.shape[2])  # (batch, 1, 5)
+            if feature_mean is not None and feature_std is not None:
+                sampled_feats = torch.randn_like(current_input[:, :1, :]) * feature_std + feature_mean
+            else:
+                sampled_feats = torch.zeros_like(current_input[:, :1, :])
+            sampled_feats[:, :, 0:1] = pred  # 目标特征用模型预测
+            new_features = sampled_feats  # (batch, 1, features)
             current_input = torch.cat([current_input[:, 1:, :], new_features], dim=1)
     
     return np.concatenate(predictions, axis=1)
@@ -156,13 +168,13 @@ def convert_returns_to_prices(normalized_returns, initial_price, mean, std):
     return np.array(prices)
 
 
-def get_ground_truth_prices(test_dataset, start_idx, length):
+def get_ground_truth_prices(dataset, start_idx, length, use_train_prices: bool = False):
     """获取指定位置的真实价格序列"""
-    # 获取起始价格
-    if hasattr(test_dataset, 'original_close_prices_test'):
-        prices = test_dataset.original_close_prices_test
+    # 根据split选择价格序列
+    price_field = 'original_close_prices_train' if use_train_prices else 'original_close_prices_test'
+    if hasattr(dataset, price_field):
+        prices = getattr(dataset, price_field)
         if start_idx < len(prices):
-            # 返回从start_idx开始的length+1个价格（包含起始价格）
             end_idx = min(start_idx + length + 1, len(prices))
             return prices[start_idx:end_idx]
     return None
@@ -257,6 +269,106 @@ def plot_autoregressive_with_ground_truth(predictions_list, ground_truth_list, l
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✓ 多区间自回归预测图保存到: {output_path}")
     plt.close()
+
+
+def run_autoregressive_for_split(dataset, split_name: str, use_train_prices: bool, args, model, device):
+    """在指定数据集上执行多区间自回归预测并绘图"""
+    print(f"\nAutoregressive prediction on {split_name} set "
+          f"({args.num_intervals} intervals, initial length {args.initial_length}, "
+          f"predict steps {args.autoregressive_steps}, seq length {args.seq_length})...")
+
+    data_len = len(dataset)
+    interval_positions = np.linspace(
+        0, max(0, data_len - args.autoregressive_steps - 1),
+        args.num_intervals, dtype=int
+    )
+
+    predictions_list = []
+    ground_truth_list = []
+    full_predictions_list = []
+    full_truth_list = []
+    labels_list = []
+    pred_prices_list = []
+    truth_prices_list = []
+
+    # 统计用于恢复价格
+    mean = dataset.mean[0].item()
+    std = dataset.std[0].item()
+    feature_mean = dataset.mean  # (features,)
+    feature_std = dataset.std    # (features,)
+
+    for i, start_idx in enumerate(interval_positions):
+        print(f"  Interval {i+1}/{args.num_intervals}: start {start_idx}")
+
+        # 获取初始输入
+        initial_input, labels = dataset[start_idx]
+        initial_input = initial_input.unsqueeze(0).to(device)
+        truth_full = labels.squeeze().numpy()
+
+        # 自回归预测（标准化收益率）
+        ar_pred = autoregressive_predict(
+            model, initial_input, args.autoregressive_steps, device, args.model_type, args.initial_length,
+            noise_std=args.autoregressive_noise_std,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+        )  # (1, steps, 1)
+
+        pred_full = np.concatenate([truth_full[:args.initial_length], ar_pred[0, :, 0]])
+        full_predictions_list.append(pred_full)
+        full_truth_list.append(truth_full[:len(pred_full)])
+
+        predictions_list.append(ar_pred[0, :, 0])
+        ground_truth_list.append(truth_full[args.initial_length:args.initial_length + args.autoregressive_steps])
+        labels_list.append(f"{split_name} Interval {i+1} (Start: {start_idx})")
+
+        # 恢复绝对价格
+        truth_prices = get_ground_truth_prices(dataset, start_idx, args.seq_length, use_train_prices=use_train_prices)
+        if truth_prices is not None and len(truth_prices) > 0:
+            initial_price = truth_prices[0]
+            pred_prices_full = convert_returns_to_prices(pred_full, initial_price, mean, std)
+            truth_prices_full = convert_returns_to_prices(truth_full[:len(pred_full)], initial_price, mean, std)
+            pred_prices_list.append(pred_prices_full)
+            truth_prices_list.append(truth_prices_full)
+
+            steps_price = min(len(pred_prices_full), len(truth_prices_full))
+            price_mae = np.mean(np.abs(pred_prices_full[:steps_price] - truth_prices_full[:steps_price]))
+            price_mape = np.mean(np.abs((truth_prices_full[1:steps_price] - pred_prices_full[1:steps_price]) /
+                                       (truth_prices_full[1:steps_price] + 1e-10))) * 100
+            print(f"    Return MAE: {np.mean(np.abs(ar_pred[0, :, 0] - truth_full[args.initial_length:args.initial_length + args.autoregressive_steps])):.4f}, "
+                  f"RMSE: {np.sqrt(np.mean((ar_pred[0, :, 0] - truth_full[args.initial_length:args.initial_length + args.autoregressive_steps]) ** 2)):.4f}")
+            print(f"    Price MAE: {price_mae:.2f}, MAPE: {price_mape:.2f}%")
+        else:
+            steps = min(len(ar_pred[0, :, 0]), args.autoregressive_steps)
+            mae = np.mean(np.abs(ar_pred[0, :steps, 0] - truth_full[args.initial_length:args.initial_length + steps]))
+            rmse = np.sqrt(np.mean((ar_pred[0, :steps, 0] - truth_full[args.initial_length:args.initial_length + steps]) ** 2))
+            print(f"    MAE: {mae:.4f}, RMSE: {rmse:.4f}")
+
+    # 保存结果
+    split_tag = split_name.lower().replace(" ", "_")
+    ar_output_path = os.path.join(args.output_dir, f'autoregressive_predictions_multi_{split_tag}.npz')
+    save_dict = {
+        'predictions': np.array(predictions_list),
+        'ground_truth': np.array(ground_truth_list),
+        'predictions_full': np.array(full_predictions_list),
+        'ground_truth_full': np.array(full_truth_list),
+        'start_positions': interval_positions,
+        'initial_length': args.initial_length,
+        'predict_steps': args.autoregressive_steps,
+    }
+    if pred_prices_list:
+        save_dict['pred_prices'] = np.array(pred_prices_list, dtype=object)
+        save_dict['truth_prices'] = np.array(truth_prices_list, dtype=object)
+    np.savez(ar_output_path, **save_dict)
+    print(f"✓ Autoregressive results saved to: {ar_output_path}")
+
+    # 绘图
+    if args.plot:
+        ar_plot_path = os.path.join(args.output_dir, f'autoregressive_multi_intervals_{split_tag}.png')
+        plot_autoregressive_with_ground_truth(
+            full_predictions_list, full_truth_list, labels_list, ar_plot_path, initial_length=args.initial_length,
+            pred_prices_list=pred_prices_list if pred_prices_list else None,
+            truth_prices_list=truth_prices_list if truth_prices_list else None
+        )
 
 
 def plot_predictions(predictions, labels, output_path):
@@ -419,7 +531,7 @@ def build_eval_parser(add_help: bool = False) -> argparse.ArgumentParser:
         '--model_type',
         type=str,
         required=True,
-        choices=['csept', 'csept_smooth', 'sept'],
+        choices=['csept', 'csept_smooth', 'sept', 'rnn_naive', 'lstm_naive'],
         help='模型类型',
     )
 
@@ -588,6 +700,20 @@ def run_eval(args):
     print(f"✓ 测试集: {len(test_dataset)} 样本")
     print()
 
+    # 训练区间数据用于自回归评估（避免增强与噪声，使用训练区间作为“测试”范围）
+    train_eval_dataset = SpetDataset(
+        args.data_path,
+        args.seq_length,
+        is_train=False,  # 关闭增强和噪声
+        train_start=args.train_start,
+        train_end=args.train_end,
+        test_start=args.train_start,
+        test_end=args.train_end,
+        apply_smoothing=args.dataset_apply_smoothing,
+        smooth_window_size=args.dataset_smooth_window_size,
+        smooth_target_features=args.dataset_smooth_target_features,
+    )
+
     # 评估模型
     print("开始评估...")
     avg_loss, predictions, labels = evaluate_model(model, test_loader, device, args.model_type)
@@ -626,102 +752,10 @@ def run_eval(args):
         plot_path = os.path.join(args.output_dir, 'predictions.png')
         plot_predictions(predictions, labels, plot_path)
 
-    # 自回归预测（多区间）
+    # 自回归预测（在训练区间和测试区间都执行）
     if args.autoregressive_steps > 0:
-        print(f"\n开始多区间自回归预测 ({args.num_intervals} 个区间, 初始长度 {args.initial_length}, "
-              f"预测步数 {args.autoregressive_steps}, 总seq长度 {args.seq_length})...")
-
-        # 计算测试集中均匀分布的起始点
-        test_len = len(test_dataset)
-        interval_positions = np.linspace(
-            0, max(0, test_len - args.autoregressive_steps - 1),
-            args.num_intervals, dtype=int
-        )
-
-        predictions_list = []
-        ground_truth_list = []
-        full_predictions_list = []
-        full_truth_list = []
-        labels_list = []
-        pred_prices_list = []
-        truth_prices_list = []
-
-        # 获取标准化参数（用于恢复价格）
-        mean = test_dataset.mean[0].item()  # Close价格的均值
-        std = test_dataset.std[0].item()    # Close价格的标准差
-
-        for i, start_idx in enumerate(interval_positions):
-            print(f"  区间 {i+1}/{args.num_intervals}: 起始位置 {start_idx}")
-
-            # 获取初始输入
-            initial_input, labels = test_dataset[start_idx]
-            initial_input = initial_input.unsqueeze(0).to(device)  # (1, seq_length, features)
-            truth_full = labels.squeeze().numpy()  # (seq_length,)
-
-            # 自回归预测（标准化的收益率）
-            ar_pred = autoregressive_predict(
-                model, initial_input, args.autoregressive_steps, device, args.model_type, args.initial_length,
-                noise_std=args.autoregressive_noise_std,
-            )  # (1, steps, 1)
-
-            # 组装完整预测序列：前initial_length使用真实值，后半部分使用预测
-            pred_full = np.concatenate([truth_full[:args.initial_length], ar_pred[0, :, 0]])
-            full_predictions_list.append(pred_full)
-            full_truth_list.append(truth_full[:len(pred_full)])
-
-            predictions_list.append(ar_pred[0, :, 0])  # 仅预测段
-            ground_truth_list.append(truth_full[args.initial_length:args.initial_length + args.autoregressive_steps])
-            labels_list.append(f"Interval {i+1} (Start: {start_idx})")
-
-            # 恢复为绝对价格
-            truth_prices = get_ground_truth_prices(test_dataset, start_idx, args.seq_length)
-            if truth_prices is not None and len(truth_prices) > 0:
-                initial_price = truth_prices[0]
-                pred_prices_full = convert_returns_to_prices(pred_full, initial_price, mean, std)
-                truth_prices_full = convert_returns_to_prices(truth_full[:len(pred_full)], initial_price, mean, std)
-                pred_prices_list.append(pred_prices_full)
-                truth_prices_list.append(truth_prices_full)
-
-                # 计算价格层面的指标
-                steps_price = min(len(pred_prices_full), len(truth_prices_full))
-                price_mae = np.mean(np.abs(pred_prices_full[:steps_price] - truth_prices_full[:steps_price]))
-                price_mape = np.mean(np.abs((truth_prices_full[1:steps_price] - pred_prices_full[1:steps_price]) /
-                                           (truth_prices_full[1:steps_price] + 1e-10))) * 100
-                print(f"    收益率 - MAE: {np.mean(np.abs(ar_pred[0, :, 0] - truth_full[args.initial_length:args.initial_length + args.autoregressive_steps])):.4f}, "
-                      f"RMSE: {np.sqrt(np.mean((ar_pred[0, :, 0] - truth_full[args.initial_length:args.initial_length + args.autoregressive_steps]) ** 2)):.4f}")
-                print(f"    价格 - MAE: {price_mae:.2f}, MAPE: {price_mape:.2f}%")
-            else:
-                # 如果没有价格数据，使用收益率指标
-                steps = min(len(ar_pred[0, :, 0]), args.autoregressive_steps)
-                mae = np.mean(np.abs(ar_pred[0, :steps, 0] - truth_full[args.initial_length:args.initial_length + steps]))
-                rmse = np.sqrt(np.mean((ar_pred[0, :steps, 0] - truth_full[args.initial_length:args.initial_length + steps]) ** 2))
-                print(f"    MAE: {mae:.4f}, RMSE: {rmse:.4f}")
-
-        # 保存所有预测结果
-        ar_output_path = os.path.join(args.output_dir, 'autoregressive_predictions_multi.npz')
-        save_dict = {
-            'predictions': np.array(predictions_list),
-            'ground_truth': np.array(ground_truth_list),
-            'predictions_full': np.array(full_predictions_list),
-            'ground_truth_full': np.array(full_truth_list),
-            'start_positions': interval_positions,
-            'initial_length': args.initial_length,
-            'predict_steps': args.autoregressive_steps,
-        }
-        if pred_prices_list:
-            save_dict['pred_prices'] = np.array(pred_prices_list, dtype=object)
-            save_dict['truth_prices'] = np.array(truth_prices_list, dtype=object)
-        np.savez(ar_output_path, **save_dict)
-        print(f"\n✓ 自回归预测结果保存到: {ar_output_path}")
-
-        # 绘制多区间对比图（使用绝对价格）
-        if args.plot:
-            ar_plot_path = os.path.join(args.output_dir, 'autoregressive_multi_intervals.png')
-            plot_autoregressive_with_ground_truth(
-                full_predictions_list, full_truth_list, labels_list, ar_plot_path, initial_length=args.initial_length,
-                pred_prices_list=pred_prices_list if pred_prices_list else None,
-                truth_prices_list=truth_prices_list if truth_prices_list else None
-            )
+        run_autoregressive_for_split(train_eval_dataset, "Train", True, args, model, device)
+        run_autoregressive_for_split(test_dataset, "Test", False, args, model, device)
 
     print()
     print("评估完成！")
