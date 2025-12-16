@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seqpred"
+version = "0.1.0"
+description = "A Transformer-based sequence prediction framework"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "SeqPred Team" }]
+dependencies = [
+  "torch>=2.0.0,<2.5.0",
+  "torchvision>=0.15.0,<0.20.0",
+  "torchaudio>=2.0.0,<2.5.0",
+  "transformers>=4.35.0,<4.45.0",
+  "pandas>=2.0.0,<2.3.0",
+  "numpy>=1.24.0,<2.0.0",
+  "matplotlib>=3.7.0,<3.10.0",
+  "seaborn>=0.12.0,<0.14.0",
+  "wandb>=0.15.0,<0.20.0",
+  "tqdm>=4.65.0",
+  "scikit-learn>=1.3.0,<1.6.0",
+  "ipython>=8.12.0",
+  "jupyter>=1.0.0",
+]
+
+[project.scripts]
+seqpred-train = "seqpred.train.trainer:main"
+seqpred-test = "seqpred.eval.evaluator:main"
+seqpred = "seqpred.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
